@@ -1,18 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
-interface Point {
-  x: number;
-  y: number;
-}
-
-interface RenderableHand {
-  handedness: string;
-  gesture: string;
-  points: Point[];
-}
-
-
-const HAND_CONNECTIONS: [number, number][] = [
+const CONNECTIONS: [number, number][] = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
   [5, 9], [9, 10], [10, 11], [11, 12],
@@ -21,116 +9,182 @@ const HAND_CONNECTIONS: [number, number][] = [
   [0, 17],
 ];
 
-const HAND_COLORS: Record<string, string> = {
-  Left: '#00FFFF',
-  Right: '#FF6B6B',
-};
+const COLORS: Record<string, string> = { Left: '#00FFFF', Right: '#FF6B6B' };
 
-function classifyGesture(landmarks: { x: number; y: number; z: number }[]): string {
-  const isUp = (tip: number, pip: number) => landmarks[tip].y < landmarks[pip].y;
-
-  const indexUp = isUp(8, 6);
-  const middleUp = isUp(12, 10);
-  const ringUp = isUp(16, 14);
-  const pinkyUp = isUp(20, 18);
-  const thumbUp = Math.hypot(
-    landmarks[4].x - landmarks[5].x,
-    landmarks[4].y - landmarks[5].y,
-  ) > 0.07;
-
-  const count = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
-
-  if (count === 0 && !thumbUp) return 'FIST';
-  if (count === 0 && thumbUp) return 'THUMBS_UP';
-  if (count === 1 && indexUp) return 'POINT';
-  if (count === 1 && middleUp) return 'MIDDLE';
-  if (count === 1 && pinkyUp) return 'PINKY';
-  if (count === 2 && indexUp && middleUp) return 'PEACE';
-  if (count === 2 && indexUp && pinkyUp) return 'ROCK';
-  if (count === 3) return 'THREE';
-  if (count === 4 && !thumbUp) return 'FOUR';
-  if (count === 4 && thumbUp) return 'OPEN';
+function classifyGesture(lm: { x: number; y: number; z: number }[]): string {
+  const u = (t: number, p: number) => lm[t].y < lm[p].y;
+  const i = u(8, 6), m = u(12, 10), r = u(16, 14), p = u(20, 18);
+  const t = Math.hypot(lm[4].x - lm[5].x, lm[4].y - lm[5].y) > 0.07;
+  const n = [i, m, r, p].filter(Boolean).length;
+  if (n === 0 && !t) return 'FIST';
+  if (n === 0 && t) return 'THUMBS_UP';
+  if (n === 1 && i) return 'POINT';
+  if (n === 1 && m) return 'MIDDLE';
+  if (n === 1 && p) return 'PINKY';
+  if (n === 2 && i && m) return 'PEACE';
+  if (n === 2 && i && p) return 'ROCK';
+  if (n === 3) return 'THREE';
+  if (n === 4 && !t) return 'FOUR';
+  if (n === 4 && t) return 'OPEN';
   return '---';
+}
+
+function drawHand(
+  ctx: CanvasRenderingContext2D,
+  pts: { x: number; y: number }[],
+  color: string,
+  gesture: string,
+  isRight: boolean,
+) {
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.7;
+
+  for (const [i, j] of CONNECTIONS) {
+    const a = pts[i], b = pts[j];
+    if (!a || !b) continue;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = 1;
+  for (const p of pts) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.font = 'bold 14px monospace';
+  ctx.globalAlpha = 0.85;
+  const label = `${gesture}`;
+  const tw = ctx.measureText(label).width;
+  const lx = isRight ? ctx.canvas.width - tw - 28 : 16;
+  const ly = 36;
+  ctx.fillStyle = `${color}22`;
+  ctx.roundRect?.(lx - 6, ly - 28, tw + 28, 34, 8) ?? ctx.fillRect(lx - 6, ly - 28, tw + 28, 34);
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.roundRect?.(lx - 6, ly - 28, tw + 28, 34, 8) ?? ctx.strokeRect(lx - 6, ly - 28, tw + 28, 34);
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 1;
+  ctx.fillText(label, lx + 10, ly - 4);
 }
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [hands, setHands] = useState<RenderableHand[]>([]);
-  const [closed, setClosed] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState('Cargando...');
+  const [closed, setClosed] = useState(false);
   const closeRef = useRef(false);
 
   function handleClose() {
     if (closeRef.current) return;
     closeRef.current = true;
     setClosed(true);
-    if (document.fullscreenElement) document.exitFullscreen();
+    document.exitFullscreen?.();
     window.close();
     setTimeout(() => { window.location.href = 'about:blank'; }, 300);
   }
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
 
-    if (typeof window.Hands === 'undefined' || typeof window.Camera === 'undefined') {
-      setStatus('Error: MediaPipe no cargó. Revisá conexión o bloqueadores.');
+    if (!window.Hands || !window.Camera) {
+      setStatus('Error: MediaPipe no cargó.');
       return;
     }
 
+    const cv = canvas;
+    const ctx = cv.getContext('2d')!;
     let disposed = false;
+    let animId = 0;
+
+    const data: {
+      pts: { x: number; y: number }[];
+      color: string;
+      gesture: string;
+      isRight: boolean;
+    }[] = [];
+
+    function resize() {
+      cv.width = window.innerWidth;
+      cv.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function draw() {
+      if (disposed) return;
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      for (const h of data) drawHand(ctx, h.pts, h.color, h.gesture, h.isRight);
+      animId = requestAnimationFrame(draw);
+    }
+    animId = requestAnimationFrame(draw);
 
     try {
-      const handsInstance = new window.Hands({
-        locateFile: (file) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      const hands = new window.Hands({
+        locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
       });
 
-      handsInstance.setOptions({
+      hands.setOptions({
         maxNumHands: 2,
-        modelComplexity: 1,
+        modelComplexity: 0,
         minDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5,
       });
 
-      handsInstance.onResults((results) => {
+      hands.onResults((results) => {
         if (disposed) return;
+        data.length = 0;
 
         if (results.multiHandLandmarks.length > 0) {
-          const data: RenderableHand[] = results.multiHandLandmarks.map(
-            (landmarks, i) => ({
-              handedness: results.multiHandedness[i]?.label ?? `Hand ${i}`,
-              gesture: classifyGesture(landmarks),
-              points: landmarks.map((lm) => ({
-                x: (1 - lm.x) * window.innerWidth,
-                y: lm.y * window.innerHeight,
-              })),
-            }),
-          );
+          const w = window.innerWidth;
+          const h = window.innerHeight;
 
-          if (data.some((h) => h.gesture === 'MIDDLE')) handleClose();
-          setHands(data);
-        } else {
-          setHands([]);
+          for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+            const lm = results.multiHandLandmarks[i];
+            const hand = results.multiHandedness[i]?.label ?? `Hand ${i}`;
+            const gesture = classifyGesture(lm);
+
+            if (gesture === 'MIDDLE') handleClose();
+
+            data.push({
+              color: COLORS[hand] ?? '#888',
+              gesture,
+              isRight: hand === 'Right',
+              pts: lm.map((p) => ({ x: (1 - p.x) * w, y: p.y * h })),
+            });
+          }
         }
       });
 
       setStatus('Solicitando cámara...');
 
       const camera = new window.Camera(video, {
-        onFrame: async () => { await handsInstance.send({ image: video }); },
-        width: 1280,
-        height: 720,
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 640,
+        height: 480,
       });
 
       camera.start()
         .then(() => setStatus(''))
-        .catch(() => setStatus('Error: No se pudo acceder a la cámara.'));
+        .catch(() => setStatus('Error: cámara no disponible.'));
     } catch {
-      setStatus('Error al inicializar MediaPipe.');
+      setStatus('Error al iniciar MediaPipe.');
     }
 
-    return () => { disposed = true; };
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(animId);
+      window.removeEventListener('resize', resize);
+    };
   }, []);
 
   if (closed) {
@@ -160,7 +214,13 @@ function App() {
         }}
         playsInline
       />
-
+      <canvas
+        ref={canvasRef}
+        style={{
+          position: 'absolute', top: 0, left: 0,
+          width: '100%', height: '100%', pointerEvents: 'none',
+        }}
+      />
       {status && (
         <div style={{
           position: 'absolute', top: '50%', left: '50%',
@@ -172,51 +232,6 @@ function App() {
           {status}
         </div>
       )}
-
-      <svg style={{
-        position: 'absolute', top: 0, left: 0,
-        width: '100%', height: '100%', pointerEvents: 'none',
-      }}>
-        {hands.map((hand) => {
-          const color = HAND_COLORS[hand.handedness] ?? '#888';
-          return (
-            <g key={hand.handedness}>
-              {HAND_CONNECTIONS.map(([i, j]) => (
-                <line
-                  key={`${i}-${j}`}
-                  x1={hand.points[i]?.x} y1={hand.points[i]?.y}
-                  x2={hand.points[j]?.x} y2={hand.points[j]?.y}
-                  stroke={color} strokeWidth={1.5}
-                  strokeLinecap="round" opacity={0.7}
-                />
-              ))}
-              {hand.points.map((pt, i) => (
-                <circle key={i} cx={pt.x} cy={pt.y} r={4} fill={color} />
-              ))}
-            </g>
-          );
-        })}
-      </svg>
-
-      {hands.map((hand) => {
-        const color = HAND_COLORS[hand.handedness] ?? '#888';
-        const isRight = hand.handedness === 'Right';
-        return (
-          <div
-            key={`label-${hand.handedness}`}
-            style={{
-              position: 'absolute', top: 16,
-              [isRight ? 'right' : 'left']: 16,
-              padding: '6px 14px', borderRadius: 8,
-              background: `${color}22`, border: `1px solid ${color}`,
-              color, fontFamily: 'monospace',
-              fontSize: 14, fontWeight: 700, pointerEvents: 'none',
-            }}
-          >
-            {hand.handedness}: {hand.gesture}
-          </div>
-        );
-      })}
     </div>
   );
 }

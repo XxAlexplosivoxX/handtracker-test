@@ -11,6 +11,7 @@ const CONNECTIONS: [number, number][] = [
 ];
 
 const COLORS: Record<string, string> = { Left: '#00FFFF', Right: '#FF6B6B' };
+const PINCH_THRESHOLD = 0.055;
 
 function classifyGesture(lm: { x: number; y: number; z: number }[]): string {
   const u = (t: number, p: number) => lm[t].y < lm[p].y;
@@ -30,12 +31,17 @@ function classifyGesture(lm: { x: number; y: number; z: number }[]): string {
   return '---';
 }
 
+function isPinching(lm: { x: number; y: number; z: number }[]): boolean {
+  return Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < PINCH_THRESHOLD;
+}
+
 function drawHand(
   ctx: CanvasRenderingContext2D,
   pts: { x: number; y: number }[],
   color: string,
   gesture: string,
   isRight: boolean,
+  isPinch: boolean,
 ) {
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
@@ -60,7 +66,7 @@ function drawHand(
 
   ctx.font = 'bold 14px monospace';
   ctx.globalAlpha = 0.85;
-  const label = gesture === 'FIST' ? '✊ AGARRAR' : gesture;
+  const label = isPinch ? '🤏 PINZAR' : gesture === 'FIST' ? '✊ AGARRAR' : gesture;
   const tw = ctx.measureText(label).width;
   const lx = isRight ? ctx.canvas.width - tw - 28 : 16;
   const ly = 36;
@@ -85,6 +91,8 @@ function App() {
   const [status, setStatus] = useState('Cargando...');
   const [closed, setClosed] = useState(false);
   const closeRef = useRef(false);
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
+  const [deviceId, setDeviceId] = useState('');
 
   function handleClose() {
     if (closeRef.current) return;
@@ -117,6 +125,7 @@ function App() {
       color: string;
       gesture: string;
       isRight: boolean;
+      isPinch: boolean;
     }[] = [];
 
     // --- Three.js ---
@@ -171,7 +180,6 @@ function App() {
     const edges = new THREE.LineSegments(edgeGeo, edgeMat);
     cube.add(edges);
 
-    // Glow ring (shows when grabbed)
     const ringGeo = new THREE.TorusGeometry(cubeSize * 1.2, 0.015, 8, 24);
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x88ddff,
@@ -202,7 +210,7 @@ function App() {
     function draw() {
       if (disposed) return;
       ctx.clearRect(0, 0, cv.width, cv.height);
-      for (const h of handsData) drawHand(ctx, h.pts, h.color, h.gesture, h.isRight);
+      for (const h of handsData) drawHand(ctx, h.pts, h.color, h.gesture, h.isRight, h.isPinch);
 
       if (countdown > 0) {
         ctx.fillStyle = 'rgba(255, 0, 0, 0.15)';
@@ -279,13 +287,30 @@ function App() {
           const visibleH = 2 * Math.tan(vFov / 2) * 5;
           const visibleW = visibleH * (window.innerWidth / window.innerHeight);
 
-          type HandInfo = { i: number; gesture: string; worldPos: THREE.Vector3 };
+          type HandInfo = {
+            i: number;
+            gesture: string;
+            isPinch: boolean;
+            palmPos: THREE.Vector3;
+            pinchPos: THREE.Vector3;
+          };
           const hands3d: HandInfo[] = [];
+
+          function lmToWorld(lm: { x: number; y: number; z: number }): THREE.Vector3 {
+            const sx = (1 - lm.x) * rw + ox;
+            const sy = lm.y * rh + oy;
+            return new THREE.Vector3(
+              (sx / window.innerWidth) * visibleW - visibleW / 2,
+              -(sy / window.innerHeight) * visibleH + visibleH / 2,
+              -lm.z * 8,
+            );
+          }
 
           for (let i = 0; i < results.multiHandLandmarks.length; i++) {
             const lm = results.multiHandLandmarks[i];
             const hand = results.multiHandedness[i]?.label ?? `Hand ${i}`;
             const gesture = classifyGesture(lm);
+            const pinch = isPinching(lm);
             if (gesture === 'MIDDLE') hasMiddle = true;
 
             let pcx = 0, pcy = 0, pcz = 0;
@@ -296,15 +321,17 @@ function App() {
             }
             pcx /= 5; pcy /= 5; pcz /= 5;
 
-            const sx = (1 - pcx) * rw + ox;
-            const sy = pcy * rh + oy;
-            const wx = (sx / window.innerWidth) * visibleW - visibleW / 2;
-            const wy = -(sy / window.innerHeight) * visibleH + visibleH / 2;
-            const wz = -pcz * 8;
+            const palmMid = { x: pcx, y: pcy, z: pcz };
+            const pinchMid = {
+              x: (lm[4].x + lm[8].x) / 2,
+              y: (lm[4].y + lm[8].y) / 2,
+              z: (lm[4].z + lm[8].z) / 2,
+            };
 
             handsData.push({
               color: COLORS[hand] ?? '#888',
               gesture,
+              isPinch: pinch,
               isRight: hand === 'Right',
               pts: lm.map((p) => ({
                 x: (1 - p.x) * rw + ox,
@@ -312,7 +339,13 @@ function App() {
               })),
             });
 
-            hands3d.push({ i, gesture, worldPos: new THREE.Vector3(wx, wy, wz) });
+            hands3d.push({
+              i,
+              gesture,
+              isPinch: pinch,
+              palmPos: lmToWorld(palmMid),
+              pinchPos: lmToWorld(pinchMid),
+            });
           }
 
           if (hasMiddle) {
@@ -326,28 +359,31 @@ function App() {
           }
 
           // --- Cube interaction ---
+          const isHolding = (h: HandInfo) => h.gesture === 'FIST' || h.isPinch;
           let grabbedThisFrame = false;
 
           for (const h of hands3d) {
-            const dist = h.worldPos.distanceTo(cube.position);
-
-            if (!isGrabbed && h.gesture === 'FIST' && dist < GRAB_DISTANCE) {
-              isGrabbed = true;
-              grabHandIdx = h.i;
-              targetPos.copy(h.worldPos);
-              grabbedThisFrame = true;
-              break;
+            if (!isGrabbed && isHolding(h)) {
+              const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
+              if (pos.distanceTo(cube.position) < GRAB_DISTANCE) {
+                isGrabbed = true;
+                grabHandIdx = h.i;
+                targetPos.copy(pos);
+                grabbedThisFrame = true;
+                break;
+              }
             }
 
             if (isGrabbed && grabHandIdx === h.i) {
-              if (h.gesture !== 'FIST') {
+              if (isHolding(h)) {
+                const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
+                targetPos.copy(pos);
+                grabbedThisFrame = true;
+              } else {
                 isGrabbed = false;
                 grabHandIdx = -1;
                 releasePos.copy(cube.position);
                 idleTime = Date.now() / 1000;
-              } else {
-                targetPos.copy(h.worldPos);
-                grabbedThisFrame = true;
               }
               break;
             }
@@ -375,11 +411,25 @@ function App() {
         onFrame: async () => { await hands.send({ image: video }); },
         width: 640,
         height: 480,
+        ...(deviceId ? { deviceId: { exact: deviceId } as const } : {}),
       });
 
       camera.start()
-        .then(() => setStatus(''))
-        .catch(() => setStatus('Error: cámara no disponible.'));
+        .then(() => {
+          if (disposed) return;
+          setStatus('');
+          if (cameras.length === 0) {
+            navigator.mediaDevices.enumerateDevices()
+              .then((devices) => {
+                const vd = devices.filter((d) => d.kind === 'videoinput');
+                if (vd.length > 0) setCameras(vd);
+              })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {
+          if (!disposed) setStatus('Error: cámara no disponible.');
+        });
     } catch {
       setStatus('Error al iniciar MediaPipe.');
     }
@@ -390,8 +440,13 @@ function App() {
       window.removeEventListener('resize', resize);
       renderer.dispose();
       container.remove();
+      const stream = video.srcObject as MediaStream | null;
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        video.srcObject = null;
+      }
     };
-  }, []);
+  }, [deviceId]);
 
   if (closed) {
     return (
@@ -437,6 +492,33 @@ function App() {
           background: 'rgba(0,0,0,0.7)', borderRadius: 8, maxWidth: 400,
         }}>
           {status}
+        </div>
+      )}
+      {cameras.length > 1 && (
+        <div style={{
+          position: 'absolute', bottom: 16, left: 16, zIndex: 10,
+        }}>
+          <select
+            value={deviceId}
+            onChange={(e) => setDeviceId(e.target.value)}
+            style={{
+              background: 'rgba(0,0,0,0.75)',
+              color: '#ccc',
+              fontFamily: 'monospace',
+              fontSize: 12,
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: 6,
+              padding: '5px 8px',
+              cursor: 'pointer',
+              maxWidth: 200,
+            }}
+          >
+            {cameras.map((cam) => (
+              <option key={cam.deviceId} value={cam.deviceId}>
+                {cam.label || `Cámara ${cam.deviceId.slice(0, 8)}…`}
+              </option>
+            ))}
+          </select>
         </div>
       )}
     </div>

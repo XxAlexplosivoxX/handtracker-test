@@ -1,20 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
-import type { Socket } from 'socket.io-client';
-
-const SOCKET_URL = 'http://localhost:3001';
-
-interface Landmark {
-  x: number;
-  y: number;
-  z: number;
-}
-
-interface HandData {
-  handedness: string;
-  landmarks: Landmark[];
-  gesture: string;
-}
 
 interface Point {
   x: number;
@@ -27,8 +11,6 @@ interface RenderableHand {
   points: Point[];
 }
 
-type HandsInstance = InstanceType<Window['Hands']>;
-type CameraInstance = InstanceType<Window['Camera']>;
 
 const HAND_CONNECTIONS: [number, number][] = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -44,24 +26,19 @@ const HAND_COLORS: Record<string, string> = {
   Right: '#FF6B6B',
 };
 
-function classifyGesture(landmarks: Landmark[]): string {
-  const isFingerUp = (tip: number, pip: number) =>
-    landmarks[tip].y < landmarks[pip].y;
+function classifyGesture(landmarks: { x: number; y: number; z: number }[]): string {
+  const isUp = (tip: number, pip: number) => landmarks[tip].y < landmarks[pip].y;
 
-  const indexUp = isFingerUp(8, 6);
-  const middleUp = isFingerUp(12, 10);
-  const ringUp = isFingerUp(16, 14);
-  const pinkyUp = isFingerUp(20, 18);
-
-  const thumbTip = landmarks[4];
-  const indexMcp = landmarks[5];
+  const indexUp = isUp(8, 6);
+  const middleUp = isUp(12, 10);
+  const ringUp = isUp(16, 14);
+  const pinkyUp = isUp(20, 18);
   const thumbUp = Math.hypot(
-    thumbTip.x - indexMcp.x,
-    thumbTip.y - indexMcp.y,
+    landmarks[4].x - landmarks[5].x,
+    landmarks[4].y - landmarks[5].y,
   ) > 0.07;
 
-  const fingers = [indexUp, middleUp, ringUp, pinkyUp];
-  const count = fingers.filter(Boolean).length;
+  const count = [indexUp, middleUp, ringUp, pinkyUp].filter(Boolean).length;
 
   if (count === 0 && !thumbUp) return 'FIST';
   if (count === 0 && thumbUp) return 'THUMBS_UP';
@@ -78,67 +55,33 @@ function classifyGesture(landmarks: Landmark[]): string {
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const socketRef = useRef<Socket | null>(null);
   const [hands, setHands] = useState<RenderableHand[]>([]);
   const [closed, setClosed] = useState(false);
+  const [status, setStatus] = useState('Cargando...');
   const closeRef = useRef(false);
-  const [status, setStatus] = useState<string>('Cargando...');
 
-  const closeWindow = useRef(() => {
+  function handleClose() {
     if (closeRef.current) return;
     closeRef.current = true;
     setClosed(true);
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    }
+    if (document.fullscreenElement) document.exitFullscreen();
     window.close();
-    setTimeout(() => {
-      window.location.href = 'about:blank';
-    }, 300);
-  });
-
-  useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
-    socketRef.current = socket;
-
-    socket.on('connect_error', () => {
-      console.warn('[socket] connection failed (server may be off)');
-    });
-
-    socket.on('render_hand', (data: HandData[]) => {
-      setHands(
-        data.map((h) => ({
-          handedness: h.handedness,
-          gesture: h.gesture,
-          points: h.landmarks.map((lm) => ({
-            x: (1 - lm.x) * window.innerWidth,
-            y: lm.y * window.innerHeight,
-          })),
-        })),
-      );
-    });
-
-    return () => {
-      socket.disconnect();
-      socketRef.current = null;
-    };
-  }, []);
+    setTimeout(() => { window.location.href = 'about:blank'; }, 300);
+  }
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     if (typeof window.Hands === 'undefined' || typeof window.Camera === 'undefined') {
-      setStatus('Error: MediaPipe no cargó. Revisá la conexión a Internet o bloqueadores de anuncios.');
+      setStatus('Error: MediaPipe no cargó. Revisá conexión o bloqueadores.');
       return;
     }
 
     let disposed = false;
-    let handsInstance: HandsInstance | null = null;
-    let camera: CameraInstance | null = null;
 
     try {
-      handsInstance = new window.Hands({
+      const handsInstance = new window.Hands({
         locateFile: (file) =>
           `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
       });
@@ -154,30 +97,19 @@ function App() {
         if (disposed) return;
 
         if (results.multiHandLandmarks.length > 0) {
-          const handsData: HandData[] = results.multiHandLandmarks.map(
+          const data: RenderableHand[] = results.multiHandLandmarks.map(
             (landmarks, i) => ({
               handedness: results.multiHandedness[i]?.label ?? `Hand ${i}`,
-              landmarks,
               gesture: classifyGesture(landmarks),
-            }),
-          );
-
-          if (handsData.some((h) => h.gesture === 'MIDDLE')) {
-            closeWindow.current();
-          }
-
-          setHands(
-            handsData.map((h) => ({
-              handedness: h.handedness,
-              gesture: h.gesture,
-              points: h.landmarks.map((lm) => ({
+              points: landmarks.map((lm) => ({
                 x: (1 - lm.x) * window.innerWidth,
                 y: lm.y * window.innerHeight,
               })),
-            })),
+            }),
           );
 
-          socketRef.current?.emit('hand_data', handsData);
+          if (data.some((h) => h.gesture === 'MIDDLE')) handleClose();
+          setHands(data);
         } else {
           setHands([]);
         }
@@ -185,107 +117,66 @@ function App() {
 
       setStatus('Solicitando cámara...');
 
-      camera = new window.Camera(video, {
-        onFrame: async () => {
-          await handsInstance!.send({ image: video });
-        },
+      const camera = new window.Camera(video, {
+        onFrame: async () => { await handsInstance.send({ image: video }); },
         width: 1280,
         height: 720,
       });
 
-      camera.start().then(() => {
-        setStatus('');
-      }).catch((err: unknown) => {
-        console.error('[camera] error:', err);
-        setStatus('Error: No se pudo acceder a la cámara. Permisos denegados o cámara no disponible.');
-      });
-    } catch (err) {
-      console.error('[mediapipe] init error:', err);
+      camera.start()
+        .then(() => setStatus(''))
+        .catch(() => setStatus('Error: No se pudo acceder a la cámara.'));
+    } catch {
       setStatus('Error al inicializar MediaPipe.');
     }
 
-    return () => {
-      disposed = true;
-    };
+    return () => { disposed = true; };
   }, []);
 
   if (closed) {
     return (
-      <div
-        style={{
-          width: '100vw',
-          height: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: '#000',
-          color: '#FF6B6B',
-          fontFamily: 'monospace',
-          fontSize: 32,
-          fontWeight: 700,
-        }}
-      >
+      <div style={{
+        width: '100vw', height: '100vh', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        background: '#000', color: '#FF6B6B',
+        fontFamily: 'monospace', fontSize: 32, fontWeight: 700,
+      }}>
         Cerrando...
       </div>
     );
   }
 
   return (
-    <div
-      style={{
-        width: '100vw',
-        height: '100vh',
-        overflow: 'hidden',
-        position: 'relative',
-        background: '#111',
-      }}
-    >
+    <div style={{
+      width: '100vw', height: '100vh', overflow: 'hidden',
+      position: 'relative', background: '#111',
+    }}>
       <video
         ref={videoRef}
         style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          opacity: 0.6,
-          transform: 'scaleX(-1)',
+          position: 'absolute', top: 0, left: 0,
+          width: '100%', height: '100%', objectFit: 'cover',
+          opacity: 0.6, transform: 'scaleX(-1)',
         }}
         playsInline
       />
 
       {status && (
-        <div
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            color: '#fff',
-            fontFamily: 'monospace',
-            fontSize: 18,
-            textAlign: 'center',
-            padding: 20,
-            background: 'rgba(0,0,0,0.7)',
-            borderRadius: 8,
-            maxWidth: 400,
-          }}
-        >
+        <div style={{
+          position: 'absolute', top: '50%', left: '50%',
+          transform: 'translate(-50%, -50%)',
+          color: '#fff', fontFamily: 'monospace', fontSize: 18,
+          textAlign: 'center', padding: 20,
+          background: 'rgba(0,0,0,0.7)', borderRadius: 8, maxWidth: 400,
+        }}>
           {status}
         </div>
       )}
 
-      <svg
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%',
-          pointerEvents: 'none',
-        }}
-      >
+      <svg style={{
+        position: 'absolute', top: 0, left: 0,
+        width: '100%', height: '100%', pointerEvents: 'none',
+      }}>
         {hands.map((hand) => {
           const color = HAND_COLORS[hand.handedness] ?? '#888';
           return (
@@ -293,24 +184,14 @@ function App() {
               {HAND_CONNECTIONS.map(([i, j]) => (
                 <line
                   key={`${i}-${j}`}
-                  x1={hand.points[i]?.x}
-                  y1={hand.points[i]?.y}
-                  x2={hand.points[j]?.x}
-                  y2={hand.points[j]?.y}
-                  stroke={color}
-                  strokeWidth={1.5}
-                  strokeLinecap="round"
-                  opacity={0.7}
+                  x1={hand.points[i]?.x} y1={hand.points[i]?.y}
+                  x2={hand.points[j]?.x} y2={hand.points[j]?.y}
+                  stroke={color} strokeWidth={1.5}
+                  strokeLinecap="round" opacity={0.7}
                 />
               ))}
               {hand.points.map((pt, i) => (
-                <circle
-                  key={i}
-                  cx={pt.x}
-                  cy={pt.y}
-                  r={4}
-                  fill={color}
-                />
+                <circle key={i} cx={pt.x} cy={pt.y} r={4} fill={color} />
               ))}
             </g>
           );
@@ -324,18 +205,12 @@ function App() {
           <div
             key={`label-${hand.handedness}`}
             style={{
-              position: 'absolute',
-              top: 16,
+              position: 'absolute', top: 16,
               [isRight ? 'right' : 'left']: 16,
-              padding: '6px 14px',
-              borderRadius: 8,
-              background: `${color}22`,
-              border: `1px solid ${color}`,
-              color,
-              fontFamily: 'monospace',
-              fontSize: 14,
-              fontWeight: 700,
-              pointerEvents: 'none',
+              padding: '6px 14px', borderRadius: 8,
+              background: `${color}22`, border: `1px solid ${color}`,
+              color, fontFamily: 'monospace',
+              fontSize: 14, fontWeight: 700, pointerEvents: 'none',
             }}
           >
             {hand.handedness}: {hand.gesture}

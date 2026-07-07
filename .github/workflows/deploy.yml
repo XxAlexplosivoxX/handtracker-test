@@ -14,13 +14,12 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
-defaults:
-  run:
-    working-directory: frontend
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +37,7 @@ jobs:
 
       - run: pnpm build
         env:
-          BASE_URL: /handtrackert-test/
+          BASE_URL: /handtracker-test/
 
       - uses: actions/upload-pages-artifact@v3
         with:

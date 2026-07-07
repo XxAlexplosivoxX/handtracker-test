@@ -47,7 +47,6 @@ function drawHand(
   ctx.fillStyle = color;
   ctx.lineWidth = 2;
   ctx.globalAlpha = 0.7;
-
   for (const [i, j] of CONNECTIONS) {
     const a = pts[i], b = pts[j];
     if (!a || !b) continue;
@@ -56,14 +55,12 @@ function drawHand(
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
   }
-
   ctx.globalAlpha = 1;
   for (const p of pts) {
     ctx.beginPath();
     ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
     ctx.fill();
   }
-
   ctx.font = 'bold 14px monospace';
   ctx.globalAlpha = 0.85;
   const label = isPinch ? '🤏 PINZAR' : gesture === 'FIST' ? '✊ AGARRAR' : gesture;
@@ -93,6 +90,7 @@ function App() {
   const closeRef = useRef(false);
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
+  const switchCameraRef = useRef<((id: string) => Promise<boolean>) | undefined>(undefined);
 
   function handleClose() {
     if (closeRef.current) return;
@@ -108,7 +106,7 @@ function App() {
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
-    if (!window.Hands || !window.Camera) {
+    if (!window.Hands) {
       setStatus('Error: MediaPipe no cargó.');
       return;
     }
@@ -119,7 +117,6 @@ function App() {
     let animId = 0;
     let shutdownStart = 0;
     let countdown = 0;
-
     const handsData: {
       pts: { x: number; y: number }[];
       color: string;
@@ -136,7 +133,6 @@ function App() {
 
     const FOV = 50;
     const scene = new THREE.Scene();
-
     const threeCam = new THREE.PerspectiveCamera(FOV, window.innerWidth / window.innerHeight, 0.1, 20);
     threeCam.position.set(0, 0, 5);
 
@@ -159,34 +155,19 @@ function App() {
     const cubeSize = 0.18;
     const cubeGeo = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
     const cubeMat = new THREE.MeshPhysicalMaterial({
-      color: 0x44aaff,
-      metalness: 0.3,
-      roughness: 0.15,
-      emissive: 0x44aaff,
-      emissiveIntensity: 0.08,
-      clearcoat: 0.3,
-      clearcoatRoughness: 0.2,
+      color: 0x44aaff, metalness: 0.3, roughness: 0.15,
+      emissive: 0x44aaff, emissiveIntensity: 0.08, clearcoat: 0.3, clearcoatRoughness: 0.2,
     });
     const cube = new THREE.Mesh(cubeGeo, cubeMat);
     cube.position.set(0, 0, 0);
     scene.add(cube);
 
     const edgeGeo = new THREE.EdgesGeometry(cubeGeo);
-    const edgeMat = new THREE.LineBasicMaterial({
-      color: 0x88ddff,
-      transparent: true,
-      opacity: 0.4,
-    });
-    const edges = new THREE.LineSegments(edgeGeo, edgeMat);
-    cube.add(edges);
+    const edgeMat = new THREE.LineBasicMaterial({ color: 0x88ddff, transparent: true, opacity: 0.4 });
+    cube.add(new THREE.LineSegments(edgeGeo, edgeMat));
 
-    const ringGeo = new THREE.TorusGeometry(cubeSize * 1.2, 0.015, 8, 24);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0x88ddff,
-      transparent: true,
-      opacity: 0,
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x88ddff, transparent: true, opacity: 0 });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(cubeSize * 1.2, 0.015, 8, 24), ringMat);
     ring.rotation.x = Math.PI / 2;
     cube.add(ring);
 
@@ -196,7 +177,7 @@ function App() {
     let idleTime = 0;
     let releasePos = new THREE.Vector3(0, 0, 0);
 
-    // --- Canvas ---
+    // --- Resize ---
     function resize() {
       cv.width = window.innerWidth;
       cv.height = window.innerHeight;
@@ -207,6 +188,7 @@ function App() {
     resize();
     window.addEventListener('resize', resize);
 
+    // --- RAF loop ---
     function draw() {
       if (disposed) return;
       ctx.clearRect(0, 0, cv.width, cv.height);
@@ -227,7 +209,6 @@ function App() {
         ctx.textBaseline = 'alphabetic';
       }
 
-      // --- Cube animation ---
       if (isGrabbed) {
         cube.position.lerp(targetPos, 0.12);
         cube.scale.lerp(new THREE.Vector3(1.35, 1.35, 1.35), 0.1);
@@ -254,185 +235,177 @@ function App() {
     }
     animId = requestAnimationFrame(draw);
 
-    // --- MediaPipe ---
-    try {
-      const hands = new window.Hands({
-        locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
-      });
+    // --- MediaPipe Hands setup ---
+    const hands = new window.Hands({
+      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+    });
+    hands.setOptions({
+      maxNumHands: 2, modelComplexity: 0,
+      minDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
+    });
 
-      hands.setOptions({
-        maxNumHands: 2,
-        modelComplexity: 0,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-      });
+    hands.onResults((results) => {
+      if (disposed) return;
+      handsData.length = 0;
 
-      hands.onResults((results) => {
-        if (disposed) return;
-        handsData.length = 0;
+      if (results.multiHandLandmarks.length > 0) {
+        const cw = window.innerWidth;
+        const ch = window.innerHeight;
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 480;
+        const scale = Math.max(cw / vw, ch / vh);
+        const rw = vw * scale;
+        const rh = vh * scale;
+        const ox = (cw - rw) / 2;
+        const oy = (ch - rh) / 2;
+        let hasMiddle = false;
 
-        if (results.multiHandLandmarks.length > 0) {
-          const cw = window.innerWidth;
-          const ch = window.innerHeight;
-          const vw = video.videoWidth || 640;
-          const vh = video.videoHeight || 480;
-          const scale = Math.max(cw / vw, ch / vh);
-          const rw = vw * scale;
-          const rh = vh * scale;
-          const ox = (cw - rw) / 2;
-          const oy = (ch - rh) / 2;
-          let hasMiddle = false;
+        const vFov = FOV * Math.PI / 180;
+        const visibleH = 2 * Math.tan(vFov / 2) * 5;
+        const visibleW = visibleH * (window.innerWidth / window.innerHeight);
 
-          const vFov = FOV * Math.PI / 180;
-          const visibleH = 2 * Math.tan(vFov / 2) * 5;
-          const visibleW = visibleH * (window.innerWidth / window.innerHeight);
+        type HandInfo = {
+          i: number; gesture: string; isPinch: boolean;
+          palmPos: THREE.Vector3; pinchPos: THREE.Vector3;
+        };
+        const hands3d: HandInfo[] = [];
 
-          type HandInfo = {
-            i: number;
-            gesture: string;
-            isPinch: boolean;
-            palmPos: THREE.Vector3;
-            pinchPos: THREE.Vector3;
-          };
-          const hands3d: HandInfo[] = [];
+        function lmToWorld(lm: { x: number; y: number; z: number }): THREE.Vector3 {
+          const sx = (1 - lm.x) * rw + ox;
+          const sy = lm.y * rh + oy;
+          return new THREE.Vector3(
+            (sx / window.innerWidth) * visibleW - visibleW / 2,
+            -(sy / window.innerHeight) * visibleH + visibleH / 2,
+            -lm.z * 8,
+          );
+        }
 
-          function lmToWorld(lm: { x: number; y: number; z: number }): THREE.Vector3 {
-            const sx = (1 - lm.x) * rw + ox;
-            const sy = lm.y * rh + oy;
-            return new THREE.Vector3(
-              (sx / window.innerWidth) * visibleW - visibleW / 2,
-              -(sy / window.innerHeight) * visibleH + visibleH / 2,
-              -lm.z * 8,
-            );
-          }
+        for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+          const lm = results.multiHandLandmarks[i];
+          const hand = results.multiHandedness[i]?.label ?? `Hand ${i}`;
+          const gesture = classifyGesture(lm);
+          const pinch = isPinching(lm);
+          if (gesture === 'MIDDLE') hasMiddle = true;
 
-          for (let i = 0; i < results.multiHandLandmarks.length; i++) {
-            const lm = results.multiHandLandmarks[i];
-            const hand = results.multiHandedness[i]?.label ?? `Hand ${i}`;
-            const gesture = classifyGesture(lm);
-            const pinch = isPinching(lm);
-            if (gesture === 'MIDDLE') hasMiddle = true;
+          let pcx = 0, pcy = 0, pcz = 0;
+          for (const idx of PALM_INDICES) { pcx += lm[idx].x; pcy += lm[idx].y; pcz += lm[idx].z; }
+          pcx /= 5; pcy /= 5; pcz /= 5;
 
-            let pcx = 0, pcy = 0, pcz = 0;
-            for (const idx of PALM_INDICES) {
-              pcx += lm[idx].x;
-              pcy += lm[idx].y;
-              pcz += lm[idx].z;
-            }
-            pcx /= 5; pcy /= 5; pcz /= 5;
+          handsData.push({
+            color: COLORS[hand] ?? '#888', gesture, isPinch: pinch, isRight: hand === 'Right',
+            pts: lm.map((p) => ({ x: (1 - p.x) * rw + ox, y: p.y * rh + oy })),
+          });
 
-            const palmMid = { x: pcx, y: pcy, z: pcz };
-            const pinchMid = {
+          hands3d.push({
+            i, gesture, isPinch: pinch,
+            palmPos: lmToWorld({ x: pcx, y: pcy, z: pcz }),
+            pinchPos: lmToWorld({
               x: (lm[4].x + lm[8].x) / 2,
               y: (lm[4].y + lm[8].y) / 2,
               z: (lm[4].z + lm[8].z) / 2,
-            };
+            }),
+          });
+        }
 
-            handsData.push({
-              color: COLORS[hand] ?? '#888',
-              gesture,
-              isPinch: pinch,
-              isRight: hand === 'Right',
-              pts: lm.map((p) => ({
-                x: (1 - p.x) * rw + ox,
-                y: p.y * rh + oy,
-              })),
-            });
+        if (hasMiddle) {
+          if (shutdownStart === 0) shutdownStart = Date.now();
+          const elapsed = (Date.now() - shutdownStart) / 1000;
+          if (elapsed >= 3) handleClose();
+          countdown = Math.max(0, Math.ceil(3 - elapsed));
+        } else { shutdownStart = 0; countdown = 0; }
 
-            hands3d.push({
-              i,
-              gesture,
-              isPinch: pinch,
-              palmPos: lmToWorld(palmMid),
-              pinchPos: lmToWorld(pinchMid),
-            });
-          }
+        const isHolding = (h: HandInfo) => h.gesture === 'FIST' || h.isPinch;
+        let grabbedThisFrame = false;
 
-          if (hasMiddle) {
-            if (shutdownStart === 0) shutdownStart = Date.now();
-            const elapsed = (Date.now() - shutdownStart) / 1000;
-            if (elapsed >= 3) handleClose();
-            countdown = Math.max(0, Math.ceil(3 - elapsed));
-          } else {
-            shutdownStart = 0;
-            countdown = 0;
-          }
-
-          // --- Cube interaction ---
-          const isHolding = (h: HandInfo) => h.gesture === 'FIST' || h.isPinch;
-          let grabbedThisFrame = false;
-
-          for (const h of hands3d) {
-            if (!isGrabbed && isHolding(h)) {
-              const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
-              if (pos.distanceTo(cube.position) < GRAB_DISTANCE) {
-                isGrabbed = true;
-                grabHandIdx = h.i;
-                targetPos.copy(pos);
-                grabbedThisFrame = true;
-                break;
-              }
-            }
-
-            if (isGrabbed && grabHandIdx === h.i) {
-              if (isHolding(h)) {
-                const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
-                targetPos.copy(pos);
-                grabbedThisFrame = true;
-              } else {
-                isGrabbed = false;
-                grabHandIdx = -1;
-                releasePos.copy(cube.position);
-                idleTime = Date.now() / 1000;
-              }
-              break;
+        for (const h of hands3d) {
+          if (!isGrabbed && isHolding(h)) {
+            const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
+            if (pos.distanceTo(cube.position) < GRAB_DISTANCE) {
+              isGrabbed = true; grabHandIdx = h.i; targetPos.copy(pos); grabbedThisFrame = true; break;
             }
           }
-
-          if (isGrabbed && !grabbedThisFrame) {
-            isGrabbed = false;
-            grabHandIdx = -1;
-            releasePos.copy(cube.position);
-            idleTime = Date.now() / 1000;
-          }
-        } else {
-          if (isGrabbed) {
-            isGrabbed = false;
-            grabHandIdx = -1;
-            releasePos.copy(cube.position);
-            idleTime = Date.now() / 1000;
+          if (isGrabbed && grabHandIdx === h.i) {
+            if (isHolding(h)) {
+              targetPos.copy(h.gesture === 'FIST' ? h.palmPos : h.pinchPos);
+              grabbedThisFrame = true;
+            } else {
+              isGrabbed = false; grabHandIdx = -1;
+              releasePos.copy(cube.position); idleTime = Date.now() / 1000;
+            }
+            break;
           }
         }
-      });
 
-      setStatus('Solicitando cámara...');
+        if (isGrabbed && !grabbedThisFrame) {
+          isGrabbed = false; grabHandIdx = -1;
+          releasePos.copy(cube.position); idleTime = Date.now() / 1000;
+        }
+      } else if (isGrabbed) {
+        isGrabbed = false; grabHandIdx = -1;
+        releasePos.copy(cube.position); idleTime = Date.now() / 1000;
+      }
+    });
 
-      const camera = new window.Camera(video, {
-        onFrame: async () => { await hands.send({ image: video }); },
-        width: 640,
-        height: 480,
-        ...(deviceId ? { deviceId: { exact: deviceId } as const } : {}),
-      });
+    // --- Camera management ---
+    async function startCamera(id: string): Promise<boolean> {
+      const v = video;
+      if (!v) return false;
+      const stream = v.srcObject as MediaStream | null;
+      if (stream) { stream.getTracks().forEach((t) => t.stop()); v.srcObject = null; }
 
-      camera.start()
-        .then(() => {
-          if (disposed) return;
-          setStatus('');
-          if (cameras.length === 0) {
-            navigator.mediaDevices.enumerateDevices()
-              .then((devices) => {
-                const vd = devices.filter((d) => d.kind === 'videoinput');
-                if (vd.length > 0) setCameras(vd);
-              })
-              .catch(() => {});
-          }
-        })
-        .catch(() => {
-          if (!disposed) setStatus('Error: cámara no disponible.');
+      try {
+        const userStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, ...(id ? { deviceId: { exact: id } } : {}) },
         });
-    } catch {
-      setStatus('Error al iniciar MediaPipe.');
+        v.srcObject = userStream;
+        await v.play();
+        if (!disposed) setStatus('');
+        return true;
+      } catch {
+        if (!disposed) setStatus('Error: no se pudo acceder a la cámara.');
+        return false;
+      }
     }
+
+    // Initial camera start
+    startCamera(deviceId).then((ok) => {
+      if (!ok || disposed) return;
+      // Enumerate devices once
+      navigator.mediaDevices.enumerateDevices()
+        .then((devices) => {
+          const vd = devices.filter((d) => d.kind === 'videoinput');
+          if (vd.length > 0) setCameras(vd);
+        })
+        .catch(() => {});
+    });
+
+    // Frame loop: grab frames from video and send to MediaPipe
+    let framePending = false;
+    async function sendFrame() {
+      if (disposed || framePending || !video) return;
+      framePending = true;
+      try {
+        if (video.readyState >= 2) await hands.send({ image: video });
+      } catch {
+        // ignore send errors
+      }
+      framePending = false;
+    }
+
+    function onFrame() {
+      if (disposed) return;
+      sendFrame();
+      requestAnimationFrame(onFrame);
+    }
+    requestAnimationFrame(onFrame);
+
+    // Expose switch function via ref
+    switchCameraRef.current = async (id: string): Promise<boolean> => {
+      setStatus('Cambiando cámara...');
+      const ok = await startCamera(id);
+      if (ok) setDeviceId(id);
+      return ok;
+    };
 
     return () => {
       disposed = true;
@@ -441,12 +414,13 @@ function App() {
       renderer.dispose();
       container.remove();
       const stream = video.srcObject as MediaStream | null;
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
-        video.srcObject = null;
-      }
+      if (stream) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; }
     };
-  }, [deviceId]);
+  }, []);
+
+  async function handleCameraChange(id: string) {
+    await switchCameraRef.current?.(id);
+  }
 
   if (closed) {
     return (
@@ -500,7 +474,7 @@ function App() {
         }}>
           <select
             value={deviceId}
-            onChange={(e) => setDeviceId(e.target.value)}
+            onChange={(e) => handleCameraChange(e.target.value)}
             style={{
               background: 'rgba(0,0,0,0.75)',
               color: '#ccc',

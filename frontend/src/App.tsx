@@ -31,12 +31,12 @@ type HandsInstance = InstanceType<Window['Hands']>;
 type CameraInstance = InstanceType<Window['Camera']>;
 
 const HAND_CONNECTIONS: [number, number][] = [
-  [0, 1], [1, 2], [2, 3], [3, 4],       // thumb
-  [0, 5], [5, 6], [6, 7], [7, 8],        // index
-  [5, 9], [9, 10], [10, 11], [11, 12],   // middle
-  [9, 13], [13, 14], [14, 15], [15, 16],  // ring
-  [13, 17], [17, 18], [18, 19], [19, 20], // pinky
-  [0, 17],                                 // palm edge
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20],
+  [0, 17],
 ];
 
 const HAND_COLORS: Record<string, string> = {
@@ -55,11 +55,10 @@ function classifyGesture(landmarks: Landmark[]): string {
 
   const thumbTip = landmarks[4];
   const indexMcp = landmarks[5];
-  const thumbDist = Math.hypot(
+  const thumbUp = Math.hypot(
     thumbTip.x - indexMcp.x,
     thumbTip.y - indexMcp.y,
-  );
-  const thumbUp = thumbDist > 0.07;
+  ) > 0.07;
 
   const fingers = [indexUp, middleUp, ringUp, pinkyUp];
   const count = fingers.filter(Boolean).length;
@@ -83,6 +82,7 @@ function App() {
   const [hands, setHands] = useState<RenderableHand[]>([]);
   const [closed, setClosed] = useState(false);
   const closeRef = useRef(false);
+  const [status, setStatus] = useState<string>('Cargando...');
 
   const closeWindow = useRef(() => {
     if (closeRef.current) return;
@@ -98,8 +98,12 @@ function App() {
   });
 
   useEffect(() => {
-    const socket = io(SOCKET_URL);
+    const socket = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
     socketRef.current = socket;
+
+    socket.on('connect_error', () => {
+      console.warn('[socket] connection failed (server may be off)');
+    });
 
     socket.on('render_hand', (data: HandData[]) => {
       setHands(
@@ -123,6 +127,11 @@ function App() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+
+    if (typeof window.Hands === 'undefined' || typeof window.Camera === 'undefined') {
+      setStatus('Error: MediaPipe no cargó. Revisá la conexión a Internet o bloqueadores de anuncios.');
+      return;
+    }
 
     let disposed = false;
     let handsInstance: HandsInstance | null = null;
@@ -174,6 +183,8 @@ function App() {
         }
       });
 
+      setStatus('Solicitando cámara...');
+
       camera = new window.Camera(video, {
         onFrame: async () => {
           await handsInstance!.send({ image: video });
@@ -182,11 +193,15 @@ function App() {
         height: 720,
       });
 
-      camera.start().catch((err: unknown) => {
+      camera.start().then(() => {
+        setStatus('');
+      }).catch((err: unknown) => {
         console.error('[camera] error:', err);
+        setStatus('Error: No se pudo acceder a la cámara. Permisos denegados o cámara no disponible.');
       });
     } catch (err) {
       console.error('[mediapipe] init error:', err);
+      setStatus('Error al inicializar MediaPipe.');
     }
 
     return () => {
@@ -239,6 +254,27 @@ function App() {
         }}
         playsInline
       />
+
+      {status && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            color: '#fff',
+            fontFamily: 'monospace',
+            fontSize: 18,
+            textAlign: 'center',
+            padding: 20,
+            background: 'rgba(0,0,0,0.7)',
+            borderRadius: 8,
+            maxWidth: 400,
+          }}
+        >
+          {status}
+        </div>
+      )}
 
       <svg
         style={{

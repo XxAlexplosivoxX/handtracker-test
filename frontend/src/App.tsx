@@ -88,7 +88,8 @@ function drawHand(
 
 const PALM_INDICES = [0, 5, 9, 13, 17] as const;
 const GRAB_DISTANCE = 0.35;
-const MODEL_SCALE = 0.25;
+const ROTATE_DISTANCE = 0.7;
+const MODEL_SCALE = 0.5;
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -164,11 +165,11 @@ function App() {
 
     // --- Model group ---
     const modelGroup = new THREE.Group();
-    modelGroup.position.set(0, 0, 0);
+    modelGroup.position.set(0.7, 0, -0.3);
     scene.add(modelGroup);
 
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x88ddff, transparent: true, opacity: 0 });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.015, 8, 24), ringMat);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.02, 8, 24), ringMat);
     ring.rotation.x = Math.PI / 2;
     modelGroup.add(ring);
 
@@ -179,7 +180,10 @@ function App() {
     let grabHandIdx = -1;
     let targetPos = new THREE.Vector3(0, 0, 0);
     let idleTime = 0;
-    let releasePos = new THREE.Vector3(0, 0, 0);
+    let releasePos = new THREE.Vector3(0.7, 0, -0.3);
+    let rotateVelY = 0;
+    let rotateVelX = 0;
+    let lastRotHandPos: THREE.Vector3 | null = null;
 
     // --- Model loading ---
     const loader = new GLTFLoader();
@@ -265,16 +269,23 @@ function App() {
         modelGroup.scale.lerp(new THREE.Vector3(1.35, 1.35, 1.35), 0.1);
         ringMat.opacity += (0.5 - ringMat.opacity) * 0.08;
         ring.scale.setScalar(1 + Math.sin(Date.now() / 300) * 0.1);
-        modelChild.rotation.y += 0.03;
+        modelChild.rotation.y += 0.03 + rotateVelY;
+        modelChild.rotation.x += rotateVelX;
       } else {
         const t = Date.now() / 1000;
         modelGroup.position.y = releasePos.y + Math.sin(t * 1.2 + idleTime) * 0.04;
         modelGroup.position.x = releasePos.x + Math.cos(t * 0.9 + idleTime) * 0.02;
         modelGroup.scale.lerp(new THREE.Vector3(1, 1, 1), 0.05);
         ringMat.opacity += (0 - ringMat.opacity) * 0.05;
-        modelChild.rotation.y += 0.008;
+        modelChild.rotation.y += 0.008 + rotateVelY;
+        modelChild.rotation.x += rotateVelX;
         ring.scale.setScalar(1);
       }
+
+      rotateVelY *= 0.92;
+      rotateVelX *= 0.92;
+      if (Math.abs(rotateVelY) < 0.0001) rotateVelY = 0;
+      if (Math.abs(rotateVelX) < 0.0001) rotateVelX = 0;
 
       renderer.render(scene, threeCam);
       animId = requestAnimationFrame(draw);
@@ -362,6 +373,7 @@ function App() {
 
         const isHolding = (h: HandInfo) => h.gesture === 'FIST' || h.isPinch;
         let grabbedThisFrame = false;
+        let rotateHand: HandInfo | null = null;
 
         for (const h of hands3d) {
           if (!isGrabbed && isHolding(h)) {
@@ -385,6 +397,28 @@ function App() {
         if (isGrabbed && !grabbedThisFrame) {
           isGrabbed = false; grabHandIdx = -1;
           releasePos.copy(modelGroup.position); idleTime = Date.now() / 1000;
+        }
+
+        // --- Rotation via hand proximity ---
+        if (!isGrabbed) {
+          for (const h of hands3d) {
+            if (!isHolding(h) && h.palmPos.distanceTo(modelGroup.position) < ROTATE_DISTANCE) {
+              rotateHand = h; break;
+            }
+          }
+        }
+
+        if (rotateHand) {
+          if (lastRotHandPos) {
+            rotateVelY += (rotateHand.palmPos.x - lastRotHandPos.x) * 3;
+            rotateVelX += (rotateHand.palmPos.y - lastRotHandPos.y) * 3;
+            ringMat.color.setHSL(0.3, 1, 0.6);
+            ringMat.opacity += (0.3 - ringMat.opacity) * 0.1;
+          }
+          lastRotHandPos = rotateHand.palmPos.clone();
+        } else {
+          lastRotHandPos = null;
+          ringMat.color.setHex(0x88ddff);
         }
       } else if (isGrabbed) {
         isGrabbed = false; grabHandIdx = -1;

@@ -199,12 +199,10 @@ function App() {
           const box = new THREE.Box3().setFromObject(group);
           const size = box.getSize(new THREE.Vector3());
           const maxDim = Math.max(size.x, size.y, size.z);
-          if (maxDim > 0) {
-            const s = MODEL_SCALE / maxDim;
-            group.scale.setScalar(s);
-          }
+          const s = maxDim > 0 ? MODEL_SCALE / maxDim : 1;
+          group.scale.setScalar(s);
           const center = box.getCenter(new THREE.Vector3());
-          group.position.set(-center.x * (maxDim > 0 ? MODEL_SCALE / maxDim : 1), 0, 0);
+          group.position.set(-center.x * s, -center.y * s, -center.z * s);
           modelCache.set(m.name, group);
         }).catch(() => {
           // fallback: show a simple box

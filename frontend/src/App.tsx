@@ -169,7 +169,7 @@ function App() {
     scene.add(modelGroup);
 
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x88ddff, transparent: true, opacity: 0 });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.02, 8, 24), ringMat);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.2, 0.04, 8, 24), ringMat);
     ring.rotation.x = Math.PI / 2;
     modelGroup.add(ring);
 
@@ -180,8 +180,8 @@ function App() {
     let grabHandIdx = -1;
     let targetPos = new THREE.Vector3(0, 0, 0);
     let pinchStartDist = 0;
-    let pinchStartBaseScale = 1;
-    let baseScale = 1;
+    let pinchStartBaseScale = 3;
+    let baseScale = 3;
     const velocity = new THREE.Vector3();
     const gravity = new THREE.Vector3(0, -0.002, 0);
 
@@ -422,7 +422,7 @@ function App() {
               pinchStartDist = d;
               pinchStartBaseScale = baseScale;
             } else {
-              baseScale = Math.max(0.3, Math.min(3, pinchStartBaseScale * (d / pinchStartDist)));
+              baseScale = Math.max(2, Math.min(6, pinchStartBaseScale * (d / pinchStartDist)));
             }
             ringMat.color.setHSL(0.6, 1, 0.6);
             ringMat.opacity += (0.4 - ringMat.opacity) * 0.1;
@@ -433,27 +433,7 @@ function App() {
           pinchStartDist = 0;
         }
 
-        // --- Hand collision physics ---
-        if (!isGrabbed && pinchStartDist === 0) {
-          const modelRadius = 0.25 * modelGroup.scale.x;
-          const handRadius = 0.15;
-
-          for (const h of hands3d) {
-            const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
-            const dist = pos.distanceTo(modelGroup.position);
-            const minDist = modelRadius + handRadius;
-
-            if (dist < minDist && dist > 0.001) {
-              const dir = new THREE.Vector3().copy(modelGroup.position).sub(pos).normalize();
-              const overlap = minDist - dist;
-              velocity.add(dir.multiplyScalar(overlap * 8));
-              ringMat.color.setHSL(0.0, 1, 0.6);
-              ringMat.opacity += (0.4 - ringMat.opacity) * 0.1;
-            }
-          }
-        } else if (pinchStartDist === 0) {
-          ringMat.color.setHex(0x88ddff);
-        }
+        if (pinchStartDist === 0 && !isGrabbed) ringMat.color.setHex(0x88ddff);
       } else if (isGrabbed) {
         isGrabbed = false; grabHandIdx = -1;
       }

@@ -12,7 +12,7 @@ const CONNECTIONS: [number, number][] = [
 ];
 
 const COLORS: Record<string, string> = { Left: '#00FFFF', Right: '#FF6B6B' };
-const PINCH_THRESHOLD = 0.055;
+const PINCH_THRESHOLD = 0.065;
 
 const MODEL_LIST = [
   { name: 'Maxwell', file: 'maxwell.glb' },
@@ -38,7 +38,8 @@ function classifyGesture(lm: { x: number; y: number; z: number }[]): string {
   return '---';
 }
 
-function isPinching(lm: { x: number; y: number; z: number }[]): boolean {
+function isPinching(lm: { x: number; y: number; z: number }[], gesture: string): boolean {
+  if (gesture === 'FIST') return false;
   return Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < PINCH_THRESHOLD;
 }
 
@@ -357,7 +358,7 @@ function App() {
           const lm = results.multiHandLandmarks[i];
           const hand = results.multiHandedness[i]?.label ?? `Hand ${i}`;
           const gesture = classifyGesture(lm);
-          const pinch = isPinching(lm);
+          const pinch = isPinching(lm, gesture);
           if (gesture === 'MIDDLE') hasMiddle = true;
 
           let pcx = 0, pcy = 0, pcz = 0;
@@ -387,7 +388,7 @@ function App() {
           countdown = Math.max(0, Math.ceil(3 - elapsed));
         } else { shutdownStart = 0; countdown = 0; }
 
-        const isHolding = (h: HandInfo) => h.gesture === 'FIST' || h.isPinch;
+        const isHolding = (h: HandInfo) => h.isPinch;
         let grabbedThisFrame = false;
 
         for (const h of hands3d) {

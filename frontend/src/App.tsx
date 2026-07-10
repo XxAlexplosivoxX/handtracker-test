@@ -184,6 +184,9 @@ function App() {
     let rotateVelY = 0;
     let rotateVelX = 0;
     let lastRotHandPos: THREE.Vector3 | null = null;
+    let pinchStartDist = 0;
+    let pinchStartBaseScale = 1;
+    let baseScale = 1;
 
     // --- Model loading ---
     const loader = new GLTFLoader();
@@ -264,9 +267,12 @@ function App() {
         ctx.textBaseline = 'alphabetic';
       }
 
+      const grabScale = isGrabbed ? 1.35 : 1;
+      const targetScale = baseScale * grabScale;
+      modelGroup.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.08);
+
       if (isGrabbed) {
         modelGroup.position.lerp(targetPos, 0.12);
-        modelGroup.scale.lerp(new THREE.Vector3(1.35, 1.35, 1.35), 0.1);
         ringMat.opacity += (0.5 - ringMat.opacity) * 0.08;
         ring.scale.setScalar(1 + Math.sin(Date.now() / 300) * 0.1);
         modelChild.rotation.y += 0.03 + rotateVelY;
@@ -275,15 +281,14 @@ function App() {
         const t = Date.now() / 1000;
         modelGroup.position.y = releasePos.y + Math.sin(t * 1.2 + idleTime) * 0.04;
         modelGroup.position.x = releasePos.x + Math.cos(t * 0.9 + idleTime) * 0.02;
-        modelGroup.scale.lerp(new THREE.Vector3(1, 1, 1), 0.05);
         ringMat.opacity += (0 - ringMat.opacity) * 0.05;
         modelChild.rotation.y += 0.008 + rotateVelY;
         modelChild.rotation.x += rotateVelX;
         ring.scale.setScalar(1);
       }
 
-      rotateVelY *= 0.92;
-      rotateVelX *= 0.92;
+      rotateVelY *= 0.96;
+      rotateVelX *= 0.96;
       if (Math.abs(rotateVelY) < 0.0001) rotateVelY = 0;
       if (Math.abs(rotateVelX) < 0.0001) rotateVelX = 0;
 
@@ -399,8 +404,28 @@ function App() {
           releasePos.copy(modelGroup.position); idleTime = Date.now() / 1000;
         }
 
+        // --- Scale via two-hand pinch ---
+        if (!isGrabbed && hands3d.length >= 2) {
+          const pinching = hands3d.filter((h) => h.isPinch);
+          if (pinching.length >= 2) {
+            const d = pinching[0].pinchPos.distanceTo(pinching[1].pinchPos);
+            if (pinchStartDist === 0) {
+              pinchStartDist = d;
+              pinchStartBaseScale = baseScale;
+            } else {
+              baseScale = Math.max(0.3, Math.min(3, pinchStartBaseScale * (d / pinchStartDist)));
+            }
+            ringMat.color.setHSL(0.6, 1, 0.6);
+            ringMat.opacity += (0.4 - ringMat.opacity) * 0.1;
+          } else {
+            pinchStartDist = 0;
+          }
+        } else {
+          pinchStartDist = 0;
+        }
+
         // --- Rotation via hand proximity ---
-        if (!isGrabbed) {
+        if (!isGrabbed && pinchStartDist === 0) {
           for (const h of hands3d) {
             if (!isHolding(h) && h.palmPos.distanceTo(modelGroup.position) < ROTATE_DISTANCE) {
               rotateHand = h; break;
@@ -410,15 +435,19 @@ function App() {
 
         if (rotateHand) {
           if (lastRotHandPos) {
-            rotateVelY += (rotateHand.palmPos.x - lastRotHandPos.x) * 3;
-            rotateVelX += (rotateHand.palmPos.y - lastRotHandPos.y) * 3;
+            const dx = rotateHand.palmPos.x - lastRotHandPos.x;
+            const dy = rotateHand.palmPos.y - lastRotHandPos.y;
+            if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) {
+              rotateVelY += dx * 12;
+              rotateVelX += dy * 12;
+            }
             ringMat.color.setHSL(0.3, 1, 0.6);
             ringMat.opacity += (0.3 - ringMat.opacity) * 0.1;
           }
           lastRotHandPos = rotateHand.palmPos.clone();
         } else {
           lastRotHandPos = null;
-          ringMat.color.setHex(0x88ddff);
+          if (pinchStartDist === 0) ringMat.color.setHex(0x88ddff);
         }
       } else if (isGrabbed) {
         isGrabbed = false; grabHandIdx = -1;

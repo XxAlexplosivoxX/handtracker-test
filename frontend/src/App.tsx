@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 const CONNECTIONS: [number, number][] = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -12,6 +13,12 @@ const CONNECTIONS: [number, number][] = [
 
 const COLORS: Record<string, string> = { Left: '#00FFFF', Right: '#FF6B6B' };
 const PINCH_THRESHOLD = 0.055;
+
+const MODEL_LIST = [
+  { name: 'Maxwell', file: 'maxwell.glb' },
+  { name: 'Tralalero', file: 'tralalero.glb' },
+  { name: 'Torre Maya', file: 'torre_maya_optimized.glb' },
+];
 
 function classifyGesture(lm: { x: number; y: number; z: number }[]): string {
   const u = (t: number, p: number) => lm[t].y < lm[p].y;
@@ -81,6 +88,7 @@ function drawHand(
 
 const PALM_INDICES = [0, 5, 9, 13, 17] as const;
 const GRAB_DISTANCE = 0.35;
+const MODEL_SCALE = 0.25;
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -90,7 +98,9 @@ function App() {
   const closeRef = useRef(false);
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState('');
+  const [modelIdx, setModelIdx] = useState(0);
   const switchCameraRef = useRef<((id: string) => Promise<boolean>) | undefined>(undefined);
+  const switchModelRef = useRef<((idx: number) => Promise<void>) | undefined>(undefined);
 
   function handleClose() {
     if (closeRef.current) return;
@@ -117,6 +127,7 @@ function App() {
     let animId = 0;
     let shutdownStart = 0;
     let countdown = 0;
+
     const handsData: {
       pts: { x: number; y: number }[];
       color: string;
@@ -151,31 +162,71 @@ function App() {
     fl.position.set(-2, -1, 2);
     scene.add(fl);
 
-    // --- Interactive Cube ---
-    const cubeSize = 0.18;
-    const cubeGeo = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
-    const cubeMat = new THREE.MeshPhysicalMaterial({
-      color: 0x44aaff, metalness: 0.3, roughness: 0.15,
-      emissive: 0x44aaff, emissiveIntensity: 0.08, clearcoat: 0.3, clearcoatRoughness: 0.2,
-    });
-    const cube = new THREE.Mesh(cubeGeo, cubeMat);
-    cube.position.set(0, 0, 0);
-    scene.add(cube);
-
-    const edgeGeo = new THREE.EdgesGeometry(cubeGeo);
-    const edgeMat = new THREE.LineBasicMaterial({ color: 0x88ddff, transparent: true, opacity: 0.4 });
-    cube.add(new THREE.LineSegments(edgeGeo, edgeMat));
+    // --- Model group ---
+    const modelGroup = new THREE.Group();
+    modelGroup.position.set(0, 0, 0);
+    scene.add(modelGroup);
 
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x88ddff, transparent: true, opacity: 0 });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(cubeSize * 1.2, 0.015, 8, 24), ringMat);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.015, 8, 24), ringMat);
     ring.rotation.x = Math.PI / 2;
-    cube.add(ring);
+    modelGroup.add(ring);
+
+    const modelChild = new THREE.Group();
+    modelGroup.add(modelChild);
 
     let isGrabbed = false;
     let grabHandIdx = -1;
     let targetPos = new THREE.Vector3(0, 0, 0);
     let idleTime = 0;
     let releasePos = new THREE.Vector3(0, 0, 0);
+
+    // --- Model loading ---
+    const loader = new GLTFLoader();
+    const modelCache = new Map<string, THREE.Group>();
+    let loadQueue: Promise<void>[] = [];
+
+    for (const m of MODEL_LIST) {
+      const url = `${import.meta.env.BASE_URL}3D_models/${m.file}`;
+      loadQueue.push(
+        loader.loadAsync(url).then((gltf) => {
+          const group = new THREE.Group();
+          group.add(gltf.scene);
+          const box = new THREE.Box3().setFromObject(group);
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          if (maxDim > 0) {
+            const s = MODEL_SCALE / maxDim;
+            group.scale.setScalar(s);
+          }
+          const center = box.getCenter(new THREE.Vector3());
+          group.position.set(-center.x * (maxDim > 0 ? MODEL_SCALE / maxDim : 1), 0, 0);
+          modelCache.set(m.name, group);
+        }).catch(() => {
+          // fallback: show a simple box
+          const g = new THREE.Group();
+          const boxMesh = new THREE.Mesh(
+            new THREE.BoxGeometry(0.18, 0.18, 0.18),
+            new THREE.MeshPhysicalMaterial({ color: 0xff4444, metalness: 0.3, roughness: 0.5 }),
+          );
+          g.add(boxMesh);
+          modelCache.set(m.name, g);
+        }),
+      );
+    }
+
+    Promise.all(loadQueue).then(() => {
+      if (disposed) return;
+      const first = modelCache.get(MODEL_LIST[0].name);
+      if (first) modelChild.add(first);
+    });
+
+    switchModelRef.current = async (idx: number) => {
+      while (modelChild.children.length > 0) modelChild.remove(modelChild.children[0]);
+      await Promise.all(loadQueue);
+      const m = modelCache.get(MODEL_LIST[idx].name);
+      if (m) modelChild.add(m);
+    };
 
     // --- Resize ---
     function resize() {
@@ -210,24 +261,19 @@ function App() {
       }
 
       if (isGrabbed) {
-        cube.position.lerp(targetPos, 0.12);
-        cube.scale.lerp(new THREE.Vector3(1.35, 1.35, 1.35), 0.1);
-        cubeMat.emissiveIntensity += (0.6 - cubeMat.emissiveIntensity) * 0.08;
-        edgeMat.opacity += (0.8 - edgeMat.opacity) * 0.08;
+        modelGroup.position.lerp(targetPos, 0.12);
+        modelGroup.scale.lerp(new THREE.Vector3(1.35, 1.35, 1.35), 0.1);
         ringMat.opacity += (0.5 - ringMat.opacity) * 0.08;
         ring.scale.setScalar(1 + Math.sin(Date.now() / 300) * 0.1);
-        cube.rotation.y += 0.03;
-        cube.rotation.x += 0.01;
+        modelChild.rotation.y += 0.03;
       } else {
         const t = Date.now() / 1000;
-        cube.position.y = releasePos.y + Math.sin(t * 1.2 + idleTime) * 0.04;
-        cube.position.x = releasePos.x + Math.cos(t * 0.9 + idleTime) * 0.02;
-        cube.scale.lerp(new THREE.Vector3(1, 1, 1), 0.05);
-        cubeMat.emissiveIntensity += (0.08 - cubeMat.emissiveIntensity) * 0.05;
-        edgeMat.opacity += (0.4 - edgeMat.opacity) * 0.05;
+        modelGroup.position.y = releasePos.y + Math.sin(t * 1.2 + idleTime) * 0.04;
+        modelGroup.position.x = releasePos.x + Math.cos(t * 0.9 + idleTime) * 0.02;
+        modelGroup.scale.lerp(new THREE.Vector3(1, 1, 1), 0.05);
         ringMat.opacity += (0 - ringMat.opacity) * 0.05;
-        cube.rotation.y += 0.008;
-        cube.rotation.x = Math.sin(t * 0.6) * 0.08;
+        modelChild.rotation.y += 0.008;
+        ring.scale.setScalar(1);
       }
 
       renderer.render(scene, threeCam);
@@ -320,7 +366,7 @@ function App() {
         for (const h of hands3d) {
           if (!isGrabbed && isHolding(h)) {
             const pos = h.gesture === 'FIST' ? h.palmPos : h.pinchPos;
-            if (pos.distanceTo(cube.position) < GRAB_DISTANCE) {
+            if (pos.distanceTo(modelGroup.position) < GRAB_DISTANCE) {
               isGrabbed = true; grabHandIdx = h.i; targetPos.copy(pos); grabbedThisFrame = true; break;
             }
           }
@@ -330,7 +376,7 @@ function App() {
               grabbedThisFrame = true;
             } else {
               isGrabbed = false; grabHandIdx = -1;
-              releasePos.copy(cube.position); idleTime = Date.now() / 1000;
+              releasePos.copy(modelGroup.position); idleTime = Date.now() / 1000;
             }
             break;
           }
@@ -338,11 +384,11 @@ function App() {
 
         if (isGrabbed && !grabbedThisFrame) {
           isGrabbed = false; grabHandIdx = -1;
-          releasePos.copy(cube.position); idleTime = Date.now() / 1000;
+          releasePos.copy(modelGroup.position); idleTime = Date.now() / 1000;
         }
       } else if (isGrabbed) {
         isGrabbed = false; grabHandIdx = -1;
-        releasePos.copy(cube.position); idleTime = Date.now() / 1000;
+        releasePos.copy(modelGroup.position); idleTime = Date.now() / 1000;
       }
     });
 
@@ -352,7 +398,6 @@ function App() {
       if (!v) return false;
       const stream = v.srcObject as MediaStream | null;
       if (stream) { stream.getTracks().forEach((t) => t.stop()); v.srcObject = null; }
-
       try {
         const userStream = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480, ...(id ? { deviceId: { exact: id } } : {}) },
@@ -367,10 +412,8 @@ function App() {
       }
     }
 
-    // Initial camera start
     startCamera(deviceId).then((ok) => {
       if (!ok || disposed) return;
-      // Enumerate devices once
       navigator.mediaDevices.enumerateDevices()
         .then((devices) => {
           const vd = devices.filter((d) => d.kind === 'videoinput');
@@ -379,7 +422,6 @@ function App() {
         .catch(() => {});
     });
 
-    // Frame loop: grab frames from video and send to MediaPipe
     let framePending = false;
     async function sendFrame() {
       if (disposed || framePending || !video) return;
@@ -399,7 +441,6 @@ function App() {
     }
     requestAnimationFrame(onFrame);
 
-    // Expose switch function via ref
     switchCameraRef.current = async (id: string): Promise<boolean> => {
       setStatus('Cambiando cámara...');
       const ok = await startCamera(id);
@@ -420,6 +461,11 @@ function App() {
 
   async function handleCameraChange(id: string) {
     await switchCameraRef.current?.(id);
+  }
+
+  async function handleModelChange(idx: number) {
+    setModelIdx(idx);
+    await switchModelRef.current?.(idx);
   }
 
   if (closed) {
@@ -468,23 +514,20 @@ function App() {
           {status}
         </div>
       )}
-      {cameras.length > 1 && (
-        <div style={{
-          position: 'absolute', bottom: 16, left: 16, zIndex: 10,
-        }}>
+      <div style={{
+        position: 'absolute', bottom: 16, left: 16, zIndex: 10,
+        display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+      }}>
+        {cameras.length > 1 && (
           <select
             value={deviceId}
             onChange={(e) => handleCameraChange(e.target.value)}
             style={{
-              background: 'rgba(0,0,0,0.75)',
-              color: '#ccc',
-              fontFamily: 'monospace',
-              fontSize: 12,
+              background: 'rgba(0,0,0,0.75)', color: '#ccc',
+              fontFamily: 'monospace', fontSize: 12,
               border: '1px solid rgba(255,255,255,0.15)',
-              borderRadius: 6,
-              padding: '5px 8px',
-              cursor: 'pointer',
-              maxWidth: 200,
+              borderRadius: 6, padding: '5px 8px', cursor: 'pointer',
+              maxWidth: 160,
             }}
           >
             {cameras.map((cam) => (
@@ -493,8 +536,24 @@ function App() {
               </option>
             ))}
           </select>
-        </div>
-      )}
+        )}
+        {MODEL_LIST.map((m, i) => (
+          <button
+            key={m.name}
+            onClick={() => handleModelChange(i)}
+            style={{
+              background: i === modelIdx ? 'rgba(68,170,255,0.3)' : 'rgba(0,0,0,0.65)',
+              color: i === modelIdx ? '#88ddff' : '#999',
+              fontFamily: 'monospace', fontSize: 11,
+              border: i === modelIdx ? '1px solid #44aaff' : '1px solid rgba(255,255,255,0.12)',
+              borderRadius: 6, padding: '5px 10px', cursor: 'pointer',
+              opacity: 0.85,
+            }}
+          >
+            {m.name}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
